@@ -415,75 +415,6 @@ END
 
 ---
 
-# 📁 Project Structure
-
-A simplified representation of the project:
-
-```text
-AI-Resume-Screening-Agent/
-│
-├── frontend/
-│   └── app.py
-│
-├── backend/
-│   └── ...
-│
-├── tests/
-│   └── ...
-│
-├── resumes/
-│   └── ...
-│
-├── README.md
-└── requirements.txt
-```
-
-> The exact backend structure can evolve as additional modules are introduced.
-
----
-
-# 🧪 Current Project Status
-
-### Phase 1 — Foundation
-
-* [x] Job description input
-* [x] Initial project pipeline
-
-### Phase 2 — AI Rubric Generation
-
-* [x] Generate evaluation criteria from job description
-* [x] Structured evaluation approach
-
-### Phase 3 — Rubric Editing
-
-* [x] Display generated rubric
-* [x] Allow recruiter modifications
-* [x] Maintain consistent rubric usage during screening
-
-### Phase 4 — Resume Processing
-
-* [x] PDF resume upload
-* [x] Multiple resume upload
-* [x] API-based resume processing
-* [x] Per-resume success/failure handling
-
-### Phase 5 — Candidate Ranking
-
-* [x] Candidate scoring
-* [x] Overall ranking
-* [x] Expandable candidate results
-* [x] Criterion-level score breakdown
-* [x] Candidate summaries
-* [x] Justifications
-
-### Phase 6 — Export & Usability
-
-* [x] CSV generation
-* [x] Downloadable ranking results
-* [x] Flat tabular export for analysis
-
----
-
 # 🔍 What Makes This Project Different?
 
 This project is not designed as simply:
@@ -546,8 +477,6 @@ Results are available outside the application through CSV export.
 
 # 🚀 Current Milestone
 
-> **Phase 6 Complete**
-
 The project currently supports the complete screening workflow:
 
 ```text
@@ -571,22 +500,6 @@ The project currently supports the complete screening workflow:
 ```
 
 The core product flow from **job description to ranked, explainable candidate results** is implemented through Phase 6.
-
----
-
-# 🔮 Roadmap
-
-The next stage of development will extend the system beyond basic resume screening toward **systematic evaluation of potential bias in AI-assisted recruitment**.
-
-Planned areas include:
-
-* Controlled synthetic resume pairs
-* Demographic-adjacent proxy testing
-* Comparative scoring analysis
-* Bias measurements
-* Audit reporting
-
-> **Phase 7 and beyond are intentionally kept outside the current implementation scope of this README milestone.**
 
 ---
 
