@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: shortlist-api
+    runtime: python
+    plan: free
+    buildCommand: python -m pip install -r backend/requirements-render.txt
+    startCommand: python -m uvicorn main:app --app-dir backend --host 0.0.0.0 --port $PORT --workers 1 --no-access-log --limit-concurrency 10
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.7"
+      - key: LLM_PROVIDER
+        value: groq
+      - key: GROQ_TIMEOUT
+        value: "35"
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        sync: false
+      - key: SHORTLIST_API_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false

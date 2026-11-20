@@ -52,3 +52,35 @@ class ResumeDetailResponse(BaseModel):
     total_score: float | None = None
     criteria_breakdown: list[dict[str, Any]] | None = None
     summary: str | None = None
+class ResumeSkills(BaseModel, strict=True):
+    technical_skills: list[str]
+    soft_skills: list[str]
+
+
+class ResumeEducation(BaseModel, strict=True):
+    degree: str | None
+    institution: str | None
+    years: str | None
+
+
+class ResumeRole(BaseModel, strict=True):
+    title: str | None
+    company: str | None
+    duration: str | None
+
+
+class ResumeProject(BaseModel, strict=True):
+    name: str | None
+    summary: str | None
+    tech_used: list[str]
+
+
+class StructuredResume(BaseModel, strict=True, allow_inf_nan=False):
+    name: str | None
+    email: str | None
+    phone: str | None
+    skills: ResumeSkills
+    years_of_experience: int | float | None
+    education: list[ResumeEducation]
+    roles: list[ResumeRole]
+    projects: list[ResumeProject]

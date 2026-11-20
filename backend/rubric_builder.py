@@ -1,8 +1,9 @@
-import ollama
 import json
+import math
 import os
 from logger_config import get_logger
-from config import LLM_MODEL
+from config import LLM_PROVIDER
+from llm_provider import INVALID_OUTPUT, LLMError, chat_json
 
 logger = get_logger(os.path.splitext(os.path.basename(__file__))[0])
 
@@ -47,16 +48,8 @@ def normalize_weights(rubric: list[dict]) -> list[dict]:
 def build_rubric(job_description: str, max_retries: int = 3) -> list[dict]:
     prompt = PROMPT_TEMPLATE.format(job_description=job_description)
 
-    last_error = None
-
     for attempt in range(1, max_retries + 1):
-        response = ollama.chat(
-            model=LLM_MODEL,
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        raw_text = response["message"]["content"].strip()
-        logger.debug(f"Attempt {attempt} raw LLM response:\n{raw_text!r}")
+        raw_text = chat_json(prompt, array=True)
 
         if raw_text.startswith("```"):
             raw_text = raw_text.split("```")[1]
@@ -66,17 +59,16 @@ def build_rubric(job_description: str, max_retries: int = 3) -> list[dict]:
 
         try:
             rubric = json.loads(raw_text)
+            if LLM_PROVIDER == "groq" and isinstance(rubric, dict):
+                rubric = rubric.get("items")
             validate_rubric(rubric)
             rubric = normalize_weights(rubric)
             logger.info(f"Successfully built rubric with {len(rubric)} criteria")
-            logger.debug(f"Final rubric:\n{json.dumps(rubric, indent=2)}")
             return rubric
-        except (json.JSONDecodeError, ValueError) as e:
-            last_error = e
-            logger.warning(f"Attempt {attempt} failed: {e}. Retrying...")
+        except ValueError:
+            logger.warning("Invalid model output while attempting to build rubric (attempt %s)", attempt)
 
-    logger.error(f"Failed to get valid rubric after {max_retries} attempts. Last error: {last_error}")
-    raise RuntimeError(f"Failed to get valid rubric after {max_retries} attempts. Last error: {last_error}")
+    raise LLMError(INVALID_OUTPUT)
 
 
 
@@ -87,11 +79,15 @@ def validate_rubric(rubric: list[dict]) -> None:
     required_fields = {"criterion", "description", "weight", "how_to_detect"}
 
     for item in rubric:
+        if not isinstance(item, dict):
+            raise ValueError("Rubric items must be objects")
+        if any(not isinstance(item.get(field), str) for field in required_fields - {"weight"}):
+            raise ValueError("Rubric text fields must be strings")
         missing = required_fields - item.keys()
         if missing:
             raise ValueError(f"Rubric item missing fields: {missing}")
-        if not isinstance(item["weight"], (int, float)) or item["weight"] < 0:
-            raise ValueError(f"Invalid weight value: {item['weight']}")
+        if type(item["weight"]) not in (int, float) or not math.isfinite(item["weight"]) or item["weight"] < 0:
+            raise ValueError("Rubric weights must be finite non-negative numbers")
 
 
 

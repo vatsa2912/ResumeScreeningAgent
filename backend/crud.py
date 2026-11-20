@@ -17,7 +17,7 @@ def create_job(db: Session, title: str, raw_description: str, rubric: list[dict]
     db.add(job)
     db.commit()
     db.refresh(job)
-    logger.info(f"Created job '{title}' with id {job.id}")
+    logger.info(f"Created job with id {job.id}")
     return job
 
 
@@ -56,7 +56,7 @@ def create_resume(db: Session, job_id: int, filename: str, raw_text: str, parsed
     db.add(resume)
     db.commit()
     db.refresh(resume)
-    logger.info(f"Saved resume '{filename}' for job_id {job_id} with id {resume.id}")
+    logger.info(f"Saved resume for job_id {job_id} with id {resume.id}")
     return resume
 
 def get_resume_by_id(db: Session, resume_id: int) -> Resume | None:
@@ -87,14 +87,19 @@ def create_score(db: Session, resume_id: int, job_id: int, scoring_result: dict)
 
 
 def get_rankings_for_job(db: Session, job_id: int) -> list[dict]:
-    scores = db.query(Score).filter(Score.job_id == job_id).order_by(Score.total_score.desc()).all()
+    rows = (
+        db.query(Score, Resume.filename)
+        .outerjoin(Resume, Score.resume_id == Resume.id)
+        .filter(Score.job_id == job_id)
+        .order_by(Score.total_score.desc())
+        .all()
+    )
 
     rankings = []
-    for score in scores:
-        resume = db.query(Resume).filter(Resume.id == score.resume_id).first()
+    for score, filename in rows:
         rankings.append({
             "resume_id": score.resume_id,
-            "filename": resume.filename if resume else "Unknown",
+            "filename": filename if filename is not None else "Unknown",
             "total_score": score.total_score,
             "criteria_breakdown": json.loads(score.criteria_breakdown_json),
             "summary": score.justification_text

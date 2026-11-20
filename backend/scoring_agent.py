@@ -1,9 +1,10 @@
-import ollama
 import json
+import math
 import os
 from logger_config import get_logger
 from resume_structurer import extract_json_from_response
-from config import LLM_MODEL
+from config import LLM_PROVIDER
+from llm_provider import INVALID_OUTPUT, LLMError, chat_json
 
 logger = get_logger(os.path.splitext(os.path.basename(__file__))[0])
 
@@ -34,11 +35,11 @@ def validate_scores(scores: list[dict], rubric: list[dict]) -> None:
         raise ValueError("Scores must be a non-empty list")
 
     rubric_criteria = {item["criterion"] for item in rubric}
-    scored_criteria = {item.get("criterion") for item in scores}
-
-    missing = rubric_criteria - scored_criteria
-    if missing:
-        raise ValueError(f"Missing scores for criteria: {missing}")
+    if any(not isinstance(item, dict) or not isinstance(item.get("criterion"), str) for item in scores):
+        raise ValueError("Score items must contain a criterion name")
+    scored_criteria = {item["criterion"] for item in scores}
+    if scored_criteria != rubric_criteria or len(scored_criteria) != len(scores):
+        raise ValueError("Expected exactly one score per rubric criterion")
 
     for item in scores:
         required_fields = {"criterion", "score", "justification"}
@@ -46,7 +47,9 @@ def validate_scores(scores: list[dict], rubric: list[dict]) -> None:
         if missing_fields:
             raise ValueError(f"Score item missing fields: {missing_fields}")
 
-        if not isinstance(item["score"], (int, float)):
+        if not isinstance(item["justification"], str) or not item["justification"].strip():
+            raise ValueError("A score must have a justification")
+        if type(item["score"]) not in (int, float) or not math.isfinite(item["score"]):
             raise ValueError(f"Score for {item['criterion']} is not a number: {item['score']}")
 
 NO_EVIDENCE_PHRASES = ["no evidence", "not mentioned", "no relevant experience", "not explicitly mentioned"]
@@ -57,10 +60,7 @@ def normalize_no_evidence_scores(scores: list[dict]) -> list[dict]:
         implies_no_evidence = any(phrase in justification_lower for phrase in NO_EVIDENCE_PHRASES)
 
         if implies_no_evidence and item["score"] != 1:
-            logger.debug(
-                f"Correcting '{item['criterion']}': justification implies no evidence "
-                f"but score was {item['score']}. Forcing to 1."
-            )
+            logger.debug("Correcting score to 1 because its justification indicates no evidence.")
             item["score"] = 1
             item["justification"] = "No evidence found for this criterion in the resume."
 
@@ -86,21 +86,15 @@ def score_resume(resume_data: dict, rubric: list[dict], max_retries: int = 3) ->
         resume_json=json.dumps(resume_data, indent=2)
     )
 
-    last_error = None
-
     for attempt in range(1, max_retries + 1):
-        response = ollama.chat(
-            model=LLM_MODEL,
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        raw_text = response["message"]["content"].strip()
-        logger.debug(f"Attempt {attempt} raw LLM response:\n{raw_text!r}")
+        raw_text = chat_json(prompt, array=True)
 
         json_text = extract_json_from_response(raw_text)
 
         try:
             scores = json.loads(json_text)
+            if LLM_PROVIDER == "groq" and isinstance(scores, dict):
+                scores = scores.get("items")
             validate_scores(scores, rubric)
             scores = normalize_no_evidence_scores(scores)
 
@@ -113,16 +107,12 @@ def score_resume(resume_data: dict, rubric: list[dict], max_retries: int = 3) ->
             }
             result["summary"] = generate_summary(result, rubric)
 
-            logger.info(f"Successfully scored {result['candidate_name']}: {total_score}/10")
-            logger.debug(f"Full scoring result:\n{json.dumps(result, indent=2)}")
             return result
 
-        except (json.JSONDecodeError, ValueError) as e:
-            last_error = e
-            logger.warning(f"Attempt {attempt} failed to score resume: {e}. Retrying...")
+        except ValueError:
+            logger.warning("Invalid model output while attempting to score resume (attempt %s)", attempt)
 
-    logger.error(f"Failed to score resume after {max_retries} attempts. Last error: {last_error}")
-    raise RuntimeError(f"Failed to score resume after {max_retries} attempts. Last error: {last_error}")
+    raise LLMError(INVALID_OUTPUT)
 
 def generate_summary(result: dict, rubric: list[dict]) -> str:
     name = result["candidate_name"]

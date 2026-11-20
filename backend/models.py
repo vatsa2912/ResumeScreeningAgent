@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime
+from sqlalchemy import Column, Float, Integer, String, Text, ForeignKey, DateTime
 from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime
 
@@ -38,7 +38,7 @@ class Score(Base):
     id = Column(Integer, primary_key=True)
     resume_id = Column(Integer, ForeignKey("resumes.id"), nullable=False)
     job_id = Column(Integer, ForeignKey("jobs.id"), nullable=False)
-    total_score = Column(Integer, nullable=False)
+    total_score = Column(Float, nullable=False)
     criteria_breakdown_json = Column(Text, nullable=False)
     justification_text = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -1,7 +1,15 @@
 """Reusable presentation helpers for the Shortlist dashboard."""
+import re
+import string
+
 import streamlit as st
 
 PAGES = ["Overview", "Job Setup", "Scoring Criteria", "Resume Screening", "Candidate Rankings"]
+
+
+def display_text(value):
+    """Escape Markdown punctuation in untrusted data displayed by Streamlit."""
+    return re.sub(f"[{re.escape(string.punctuation)}]", lambda match: "\\" + match[0], value)
 
 
 def navigate(page):
@@ -36,7 +44,7 @@ def header(title, description, job, stage, online):
     st.title(title)
     st.caption(description)
     job_name = job.get("title", "Untitled") if job else "No active job"
-    st.caption(f"Active job: {job_name}  ·  Stage: {stage}  ·  Backend: {'Connected' if online else 'Unavailable'}")
+    st.caption(f"Active job: {display_text(job_name)}  ·  Stage: {stage}  ·  Backend: {'Connected' if online else 'Unavailable'}")
     st.divider()
 
 

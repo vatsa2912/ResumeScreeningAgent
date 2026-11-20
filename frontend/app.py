@@ -1,7 +1,7 @@
 import streamlit as st
 
 from api_client import backend_online, request, valid_job, valid_rankings
-from components import empty_state, footer, header, nav_button, score_bar, sidebar
+from components import display_text, empty_state, footer, header, nav_button, score_bar, sidebar
 from styles import apply_styles
 
 st.set_page_config(page_title="Candidate Screening Hub | AI Resume Screening", page_icon=":material/groups:", layout="wide")
@@ -60,7 +60,7 @@ descriptions = {
     "Overview": "Screen resumes with clear criteria and evidence-backed scores.",
     "Job Setup": "Describe the role and generate job-specific scoring criteria.",
     "Scoring Criteria": "Review and customize how candidates will be evaluated.",
-    "Resume Screening": "Add candidate resumes for local AI evaluation.",
+    "Resume Screening": "Add candidate resumes for AI evaluation.",
     "Candidate Rankings": "Compare candidates using job-specific scoring criteria.",
 }
 header("Welcome to Resume Screening Agent" if page == "Overview" else page, descriptions[page], job, stage, online)
@@ -116,10 +116,10 @@ elif page == "Job Setup":
                 if not title or not description:
                     st.error("Enter both a job title and a job description.")
                 else:
-                    with st.spinner("Generating criteria with the local model. This may take a few minutes..."):
+                    with st.spinner("Generating criteria with the AI model. This may take a few minutes..."):
                         data, error = request("POST", "/jobs", json={"title": title, "raw_description": description}, timeout=300)
                     if error:
-                        st.error(error)
+                        st.error(display_text(error))
                     elif not valid_job(data):
                         st.error("The screening service returned incomplete job or criteria data.")
                     else:
@@ -146,15 +146,15 @@ elif page == "Scoring Criteria":
             with st.container(border=True):
                 left, right = st.columns([3, 1])
                 with left:
-                    st.subheader(item["criterion"])
-                    st.write(item["description"])
+                    st.subheader(display_text(item["criterion"]))
+                    st.write(display_text(item["description"]))
                     if item.get("how_to_detect"):
-                        st.caption("Look for: " + str(item["how_to_detect"]))
+                        st.caption("Look for: " + display_text(str(item["how_to_detect"])))
                 with right:
                     key = f"weight_{st.session_state.rubric_version}_{i}"
                     if key not in st.session_state:
                         st.session_state[key] = st.session_state.weights[i]
-                    st.number_input(f"Weight for {item['criterion']} (%)", min_value=0, max_value=100, step=1, key=key, on_change=remember_weight, args=(i, key))
+                    st.number_input(f"Weight for {display_text(item['criterion'])} (%)", min_value=0, max_value=100, step=1, key=key, on_change=remember_weight, args=(i, key))
                     st.progress(st.session_state.weights[i] / 100, text=f"{st.session_state.weights[i]}% weight")
         total = sum(st.session_state.weights)
         with st.container(border=True):
@@ -169,7 +169,7 @@ elif page == "Scoring Criteria":
             with st.spinner("Saving criteria..."):
                 data, error = request("PUT", f"/jobs/{job['id']}/rubric", json={"rubric": rubric})
             if error:
-                st.error(error)
+                st.error(display_text(error))
             elif not valid_job(data):
                 st.error("The screening service returned incomplete criteria data.")
             else:
@@ -190,7 +190,7 @@ elif page == "Resume Screening":
             st.warning("You have unsaved weight changes. Save your criteria before evaluating candidates.")
         with st.container(border=True):
             st.subheader("Upload Candidate Resumes")
-            st.caption("Choose one or more PDF files. The local model evaluates each against your saved criteria.")
+            st.caption("Choose one or more PDF files. The AI model evaluates each against your saved criteria.")
             uploaded = st.file_uploader("Candidate resumes (PDF only)", type=["pdf"], accept_multiple_files=True, key=f"uploads_{job['id']}")
             if uploaded:
                 st.write(f"{len(uploaded)} file(s) selected")
@@ -203,17 +203,17 @@ elif page == "Resume Screening":
                     st.error("Each selection must be a non-empty PDF with a valid filename and PDF header.")
                 else:
                     payload = [("files", (f.name, f.getvalue(), "application/pdf")) for f in uploaded]
-                    with st.spinner("Evaluating candidates locally. This may take several minutes; please keep this page open."):
+                    with st.spinner("Evaluating candidates. This may take several minutes; please keep this page open."):
                         data, error = request("POST", f"/jobs/{job['id']}/resumes", files=payload, timeout=1800)
                     if error:
-                        st.error(error)
+                        st.error(display_text(error))
                     elif not isinstance(data.get("results"), list) or any(not isinstance(r, dict) or r.get("status") not in ("success", "failed") or not isinstance(r.get("filename"), str) for r in data["results"]):
                         st.error("The screening service returned incomplete evaluation results.")
                     else:
                         st.session_state.eval_result = data["results"]
                         error = refresh_rankings(job["id"])
                         if error:
-                            st.warning("Evaluation finished, but rankings could not be refreshed. " + error)
+                            st.warning("Evaluation finished, but rankings could not be refreshed. " + display_text(error))
                         # The backend retains old scores; re-evaluation cannot verify all are current.
                         st.rerun()
         results = st.session_state.eval_result
@@ -225,9 +225,9 @@ elif page == "Resume Screening":
                 with st.expander("Review processing errors"):
                     for item in failures:
                         st.text(item["filename"])
-                        error = str(item.get("error") or "Processing failed.")
+                        error = item.get("error")
                         # Expose expected, short per-file failures, never traces or raw responses.
-                        st.caption(error if error == "Could not extract text from PDF" else "Could not process this resume. Check the PDF and backend logs.")
+                        st.caption(display_text(error) if isinstance(error, str) and 0 < len(error) <= 200 else "Could not process this resume.")
             nav_button("View Candidate Rankings →", "Candidate Rankings", key="upload_next", primary=True)
 
 elif page == "Candidate Rankings":
@@ -237,7 +237,7 @@ elif page == "Candidate Rankings":
         if st.button("Refresh rankings"):
             error = refresh_rankings(job["id"])
             if error:
-                st.error(error)
+                st.error(display_text(error))
         if st.session_state.rankings_stale:
             st.warning("These rankings were generated using an earlier version of the scoring criteria. Re-evaluate resumes to get updated scores.")
             st.caption("Previous scores remain in the backend after re-evaluation, and the API does not identify their criteria version. This warning remains until a new job is created.")
@@ -265,14 +265,14 @@ elif page == "Candidate Rankings":
                     st.caption(f"RANK {rank:02d}")
                     st.text(entry["filename"])
                     score_bar(entry["total_score"])
-                    st.write(entry["summary"])
+                    st.write(display_text(entry["summary"]))
                     with st.expander("View Details"):
                         st.write("Criterion breakdown")
                         for criterion in entry["criteria_breakdown"]:
-                            st.write(criterion["criterion"])
+                            st.write(display_text(criterion["criterion"]))
                             score_bar(criterion["score"])
-                            st.write(criterion["justification"])
+                            st.write(display_text(criterion["justification"]))
                             if isinstance(criterion.get("evidence"), str) and criterion["evidence"]:
-                                st.caption("Evidence: " + criterion["evidence"])
+                                st.caption("Evidence: " + display_text(criterion["evidence"]))
 
 footer()

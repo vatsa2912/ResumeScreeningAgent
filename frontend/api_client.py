@@ -1,19 +1,52 @@
-"""Small client for the existing local screening API."""
+"""Server-side client for the screening API."""
 import os
+from urllib.parse import urlsplit
 
 import requests
+import streamlit as st
+from dotenv import load_dotenv
 
-BASE_URL = os.getenv("SHORTLIST_API_URL", "http://127.0.0.1:8000").rstrip("/")
+load_dotenv()
+
+
+def setting(name, default=""):
+    value = os.getenv(name)
+    if value is not None:
+        return value
+    try:
+        return st.secrets.get(name, default)
+    except FileNotFoundError:
+        return default
+
+
+BASE_URL = setting("SHORTLIST_API_URL", "http://127.0.0.1:8000").rstrip("/")
+API_TOKEN = setting("SHORTLIST_API_TOKEN").strip()
 
 
 def request(method, path, *, timeout=60, **kwargs):
+    target = urlsplit(BASE_URL)
+    if target.scheme != "https" and not (target.scheme == "http" and target.hostname in {"127.0.0.1", "localhost", "::1"}):
+        return None, "Set SHORTLIST_API_URL to an HTTPS endpoint or a local loopback address."
+    headers = {"Authorization": f"Bearer {API_TOKEN}"} if API_TOKEN else {}
     try:
-        response = requests.request(method, BASE_URL + path, timeout=timeout, **kwargs)
+        response = requests.request(
+            method, BASE_URL + path, timeout=timeout, headers=headers, allow_redirects=False, **kwargs
+        )
+        if 300 <= response.status_code < 400:
+            return None, "The screening service returned a redirect. Check the backend URL."
         response.raise_for_status()
     except requests.Timeout:
-        return None, "The screening service timed out. Local AI processing can take several minutes; check the backend before retrying."
+        return None, "The screening service timed out. It may still be processing. Check rankings before retrying."
     except requests.HTTPError as exc:
-        return None, f"The screening service returned an error (HTTP {exc.response.status_code}). Check the backend and try again."
+        status = exc.response.status_code
+        if status in {400, 401, 411, 413, 429, 502, 503}:
+            try:
+                detail = exc.response.json().get("detail")
+                if isinstance(detail, str) and 0 < len(detail) <= 200:
+                    return None, detail
+            except (ValueError, AttributeError):
+                pass
+        return None, f"The screening service returned an error (HTTP {status}). Check the backend and try again."
     except requests.RequestException:
         return None, "Cannot reach the screening service. Check that the backend is running and try again."
     try:
@@ -26,8 +59,8 @@ def request(method, path, *, timeout=60, **kwargs):
 
 
 def backend_online():
-    data, error = request("GET", "/openapi.json", timeout=2)
-    return not error and isinstance(data.get("paths"), dict)
+    data, error = request("GET", "/health", timeout=2)
+    return not error and data.get("status") == "ok"
 
 
 def valid_job(data):

@@ -1,9 +1,9 @@
-import ollama
 import json
 import re
 import os
 from logger_config import get_logger
-from config import LLM_MODEL
+from schemas import StructuredResume
+from llm_provider import INVALID_OUTPUT, LLMError, chat_json
 
 logger = get_logger(os.path.splitext(os.path.basename(__file__))[0])
 
@@ -84,56 +84,26 @@ def clean_email(email: str | None) -> str | None:
     return re.sub(r"^[^\w]+", "", email)
 
 
-def validate_structured_resume(data: dict) -> None:
-    required_fields = {"name", "email", "phone", "skills", "years_of_experience", "education", "roles", "projects"}
-    missing = required_fields - data.keys()
-    if missing:
-        raise ValueError(f"Structured resume missing fields: {missing}")
-
-    if not isinstance(data["skills"], dict):
-        raise ValueError("'skills' must be an object with 'technical_skills' and 'soft_skills'")
-    if "technical_skills" not in data["skills"] or "soft_skills" not in data["skills"]:
-        raise ValueError("'skills' must contain both 'technical_skills' and 'soft_skills'")
-    if not isinstance(data["skills"]["technical_skills"], list) or not isinstance(data["skills"]["soft_skills"], list):
-        raise ValueError("'technical_skills' and 'soft_skills' must both be lists")
-
-    if not isinstance(data["education"], list):
-        raise ValueError("'education' must be a list")
-    if not isinstance(data["roles"], list):
-        raise ValueError("'roles' must be a list")
-    if not isinstance(data["projects"], list):
-        raise ValueError("'projects' must be a list")
+def validate_structured_resume(data: dict) -> dict:
+    return StructuredResume.model_validate(data).model_dump()
 
 
 def structure_resume(resume_text: str, max_retries: int = 3) -> dict:
     prompt = PROMPT_TEMPLATE.format(resume_text=resume_text)
 
-    last_error = None
-
     for attempt in range(1, max_retries + 1):
-        response = ollama.chat(
-            model=LLM_MODEL,
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        raw_text = response["message"]["content"].strip()
-        logger.debug(f"Attempt {attempt} raw LLM response:\n{raw_text!r}")
+        raw_text = chat_json(prompt)
 
         json_text = extract_json_from_response(raw_text)
 
         try:
-            data = json.loads(json_text)
-            validate_structured_resume(data)
+            data = validate_structured_resume(json.loads(json_text))
             data["email"] = clean_email(data.get("email"))
-            logger.info(f"Successfully structured resume for: {data.get('name', 'unknown')}")
-            logger.debug(f"Final structured resume:\n{json.dumps(data, indent=2)}")
             return data
-        except (json.JSONDecodeError, ValueError) as e:
-            last_error = e
-            logger.warning(f"Attempt {attempt} failed to structure resume: {e}. Retrying...")
+        except ValueError:
+            logger.warning("Invalid model output while attempting to structure resume (attempt %s)", attempt)
 
-    logger.error(f"Failed to structure resume after {max_retries} attempts. Last error: {last_error}")
-    raise RuntimeError(f"Failed to structure resume after {max_retries} attempts. Last error: {last_error}")
+    raise LLMError(INVALID_OUTPUT)
 
 
 
@@ -147,5 +117,4 @@ if __name__ == "__main__":
         print("Could not extract text from sample PDF.")
     else:
         result = structure_resume(cleaned_text)
-        logger.debug(f"Final structured resume:\n{json.dumps(result, indent=2)}")
         print(json.dumps(result, indent=2))

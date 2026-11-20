@@ -38,13 +38,17 @@ def clean_text(text: str) -> str:
     return text
 
 
-def extract_text_from_pdf(pdf_path: str) -> str | None:
+def extract_text_from_pdf(pdf_source, *, max_pages: int | None = None) -> str | None:
     try:
         text_parts = []
 
-        with pdfplumber.open(pdf_path) as pdf:
+        with pdfplumber.open(pdf_source) as pdf:
+            if max_pages is not None and len(pdf.pages) > max_pages:
+                logger.warning("PDF exceeded the page limit")
+                return None
             for page in pdf.pages:
                 page_text = page.extract_text()
+                page.close()
                 if page_text:
                     text_parts.append(page_text)
 
@@ -52,18 +56,17 @@ def extract_text_from_pdf(pdf_path: str) -> str | None:
 
         if len(raw_text.strip()) < MIN_VALID_LENGTH:
             logger.warning(
-                f"Extracted text too short ({len(raw_text.strip())} chars) from {pdf_path} "
+                f"Extracted text too short ({len(raw_text.strip())} chars) "
                 f"- likely a scanned/image-only PDF or empty document"
             )
             return None
 
         cleaned = clean_text(raw_text)
-        logger.debug(f"Successfully extracted {len(raw_text)} raw characters from {pdf_path}")
-        logger.debug(f"Full extracted text from {pdf_path}:\n{cleaned}")
+        logger.debug("Successfully extracted %s characters", len(raw_text))
         return cleaned
 
     except Exception as e:
-        logger.error(f"Could not parse PDF {pdf_path} - {type(e).__name__}: {e}")
+        logger.warning("Could not parse PDF (%s)", type(e).__name__)
         return None
 
 
