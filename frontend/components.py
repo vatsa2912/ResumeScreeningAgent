@@ -43,7 +43,7 @@ def header(title, description, job, stage, online):
     st.markdown('<div class="overline">Shortlist / Recruitment workspace</div>', unsafe_allow_html=True)
     st.title(title)
     st.caption(description)
-    job_name = job.get("title", "Untitled") if job else "No active job"
+    job_name = f"{job.get('title', 'Untitled')} (ID {job['id']})" if job else "No active job"
     st.caption(f"Active job: {display_text(job_name)}  ·  Stage: {stage}  ·  Backend: {'Connected' if online else 'Unavailable'}")
     st.divider()
 

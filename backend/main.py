@@ -12,7 +12,12 @@ from logger_config import get_logger
 from database import init_db, get_session
 from rubric_builder import build_rubric
 import json
-from crud import create_job, update_job_rubric, get_rankings_for_job, get_job, create_resume, create_score, get_resume_by_id, get_score_for_resume
+from crud import (
+    create_job, update_job_rubric, get_rankings_for_job, get_job, get_resume_by_id,
+    get_score_for_resume, screening_digest, find_checkpoint, find_unfinished_legacy_resume,
+    save_checkpoint, save_score_once,
+)
+from models import ScreeningReceipt
 from schemas import JobCreateRequest, JobResponse, RubricUpdateRequest, RankingsResponse, ResumeUploadResult, BulkUploadResponse, ResumeDetailResponse
 from typing import List
 from resume_parser import extract_text_from_pdf
@@ -53,7 +58,9 @@ async def protect_api(request: Request, call_next):
 
 @app.exception_handler(LLMError)
 async def handle_llm_error(request: Request, exc: LLMError):
-    return JSONResponse({"detail": str(exc)}, status_code=exc.status_code)
+    headers = {"Retry-After": str(exc.retry_after_seconds)} if exc.retry_after_seconds is not None else {}
+    return JSONResponse({"detail": str(exc), "error_code": exc.error_code,
+                         "retry_after_seconds": exc.retry_after_seconds}, status_code=exc.status_code, headers=headers)
 
 
 @app.exception_handler(SQLAlchemyError)
@@ -96,13 +103,22 @@ def create_job_endpoint(request: JobCreateRequest, db: Session = Depends(get_db)
         rubric=rubric
     )
 
-    return JobResponse(
-        id=job.id,
-        title=job.title,
-        raw_description=job.raw_description,
-        rubric=json.loads(job.rubric_json)
-    )
-    
+    return job_response(job)
+
+
+def job_response(job):
+    return JobResponse(id=job.id, title=job.title, raw_description=job.raw_description,
+                       rubric=json.loads(job.rubric_json))
+
+
+@app.get("/jobs/{job_id}", response_model=JobResponse)
+def get_job_endpoint(job_id: int, db: Session = Depends(get_db)):
+    job = get_job(db, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return job_response(job)
+
+
 @app.put("/jobs/{job_id}/rubric", response_model=JobResponse)
 def update_rubric_endpoint(job_id: int, request: RubricUpdateRequest, db: Session = Depends(get_db)):
     try:
@@ -113,12 +129,7 @@ def update_rubric_endpoint(job_id: int, request: RubricUpdateRequest, db: Sessio
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job with id {job_id} not found")
 
-    return JobResponse(
-        id=job.id,
-        title=job.title,
-        raw_description=job.raw_description,
-        rubric=json.loads(job.rubric_json)
-    )
+    return job_response(job)
 
 @app.get("/jobs/{job_id}/rankings", response_model=RankingsResponse)
 def get_rankings_endpoint(job_id: int, db: Session = Depends(get_db)):
@@ -153,6 +164,49 @@ def get_resume_endpoint(resume_id: int, db: Session = Depends(get_db)):
     )
     
 
+def model_failure(filename, stage, error, resume_id=None):
+    return ResumeUploadResult(
+        filename=filename, status="failed", resume_id=resume_id, error=f"{stage} failed: {error}",
+        error_code=error.error_code, retry_after_seconds=error.retry_after_seconds,
+    )
+
+
+def score_checkpoint(db, resume_id, rubric):
+    resume = get_resume_by_id(db, resume_id)
+    filename, job_id = resume.filename, resume.job_id
+    saved = get_score_for_resume(db, resume_id)
+    if saved is None:
+        parsed = json.loads(resume.parsed_json)
+        db.rollback()
+        try:
+            result = score_resume(parsed, rubric)
+        except LLMError as exc:
+            return model_failure(filename, "Scoring", exc, resume_id)
+        total = save_score_once(db, resume_id, job_id, result)
+    else:
+        total = saved.total_score
+        db.rollback()
+    return ResumeUploadResult(filename=filename, status="success", resume_id=resume_id, total_score=total)
+
+
+@app.post("/jobs/{job_id}/resumes/{resume_id}/retry", response_model=ResumeUploadResult)
+def retry_scoring_endpoint(job_id: int, resume_id: int, db: Session = Depends(get_db)):
+    resume = get_resume_by_id(db, resume_id)
+    if resume is None or resume.job_id != job_id:
+        raise HTTPException(status_code=404, detail="Resume not found for this job.")
+    rubric = json.loads(resume.job.rubric_json)
+    digest = screening_digest(job_id, resume.filename, resume.raw_text, rubric)
+    receipt = db.query(ScreeningReceipt).filter_by(resume_id=resume_id).first()
+    if receipt and receipt.input_digest != digest:
+        return ResumeUploadResult(filename=resume.filename, status="failed", resume_id=resume_id,
+                                  error_code="rubric_changed",
+                                  error="The criteria changed. Reopen the job to screen with its current criteria.")
+    if receipt is None and get_score_for_resume(db, resume_id) is None:
+        resume_id = save_checkpoint(db, digest, job_id, resume.filename, resume.raw_text,
+                                    json.loads(resume.parsed_json), resume_id)
+    return score_checkpoint(db, resume_id, rubric)
+
+
 @app.post("/jobs/{job_id}/resumes", response_model=BulkUploadResponse)
 def upload_resumes_endpoint(job_id: int, files: List[UploadFile] = File(...), db: Session = Depends(get_db)):
     job = get_job(db, job_id)
@@ -175,53 +229,39 @@ def upload_resumes_endpoint(job_id: int, files: List[UploadFile] = File(...), db
             or upload.file.read(5) != b"%PDF-"
         ):
             results.append(ResumeUploadResult(
-                filename=filename, status="failed", error="Expected a valid PDF of up to 5 MiB."
+                filename=filename, status="failed", error_code="invalid_pdf", error="Expected a valid PDF of up to 5 MiB."
             ))
             continue
         upload.file.seek(0)
         cleaned_text = extract_text_from_pdf(upload.file, max_pages=30)
         if LLM_PROVIDER == "groq" and cleaned_text and len(cleaned_text) > 12_000:
             results.append(ResumeUploadResult(
-                filename=filename, status="failed", error="Cloud resumes are limited to 12,000 extracted characters."
+                filename=filename, status="failed", error_code="input_too_long",
+                error="Cloud resumes are limited to 12,000 extracted characters."
             ))
             continue
-        if cleaned_text is None:
+        if not cleaned_text:
             results.append(ResumeUploadResult(
-                filename=filename, status="failed", error="Could not extract text from PDF"
+                filename=filename, status="failed", error_code="invalid_pdf",
+                error="Could not read enough text. Use a PDF with selectable text, up to 30 pages. For a scan, run OCR first."
             ))
             continue
 
-        try:
-            resume_data = structure_resume(cleaned_text)
-        except LLMError as e:
-            results.append(ResumeUploadResult(
-                filename=filename, status="failed", error=f"Structuring failed: {e}"
-            ))
-            continue
+        digest = screening_digest(job_id, filename, cleaned_text, rubric)
+        checkpoint = find_checkpoint(db, digest)
+        if checkpoint:
+            resume_id = checkpoint.id
+        else:
+            legacy = find_unfinished_legacy_resume(db, job_id, filename, cleaned_text)
+            parsed = json.loads(legacy.parsed_json) if legacy else None
+            db.rollback()
+            if parsed is None:
+                try:
+                    parsed = structure_resume(cleaned_text)
+                except LLMError as exc:
+                    results.append(model_failure(filename, "Structuring", exc))
+                    continue
+            resume_id = save_checkpoint(db, digest, job_id, filename, cleaned_text, parsed)
+        results.append(score_checkpoint(db, resume_id, rubric))
 
-        resume_record = create_resume(
-            db, job_id=job_id, filename=filename, raw_text=cleaned_text, parsed_data=resume_data
-        )
-
-        resume_id = resume_record.id
-        db.rollback()
-        try:
-            scoring_result = score_resume(resume_data, rubric)
-        except LLMError as e:
-            results.append(ResumeUploadResult(
-                filename=filename, status="failed", resume_id=resume_id, error=f"Scoring failed: {e}"
-            ))
-            continue
-
-        create_score(db, resume_id=resume_id, job_id=job_id, scoring_result=scoring_result)
-
-        db.rollback()  # Release the transaction opened by the score refresh.
-        results.append(ResumeUploadResult(
-            filename=filename,
-            status="success",
-            resume_id=resume_id,
-            total_score=scoring_result["total_score"]
-        ))
-        
-        
     return BulkUploadResponse(job_id=job_id, results=results)

@@ -82,8 +82,8 @@ def calculate_weighted_total(scores: list[dict], rubric: list[dict]) -> float:
 
 def score_resume(resume_data: dict, rubric: list[dict], max_retries: int = 3) -> dict:
     prompt = PROMPT_TEMPLATE.format(
-        rubric_json=json.dumps(rubric, indent=2),
-        resume_json=json.dumps(resume_data, indent=2)
+        rubric_json=json.dumps(rubric, ensure_ascii=False, separators=(",", ":")),
+        resume_json=json.dumps(resume_data, ensure_ascii=False, separators=(",", ":"))
     )
 
     for attempt in range(1, max_retries + 1):

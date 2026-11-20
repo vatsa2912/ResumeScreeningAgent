@@ -23,38 +23,43 @@ BASE_URL = setting("SHORTLIST_API_URL", "http://127.0.0.1:8000").rstrip("/")
 API_TOKEN = setting("SHORTLIST_API_TOKEN").strip()
 
 
-def request(method, path, *, timeout=60, **kwargs):
+def request(method, path, *, timeout=60, screening=False, **kwargs):
+    def failure(message, code):
+        return ({"error_code": code} if screening else None), message
+
     target = urlsplit(BASE_URL)
     if target.scheme != "https" and not (target.scheme == "http" and target.hostname in {"127.0.0.1", "localhost", "::1"}):
-        return None, "Set SHORTLIST_API_URL to an HTTPS endpoint or a local loopback address."
+        return failure("Set SHORTLIST_API_URL to an HTTPS endpoint or a local loopback address.", "configuration")
     headers = {"Authorization": f"Bearer {API_TOKEN}"} if API_TOKEN else {}
     try:
         response = requests.request(
             method, BASE_URL + path, timeout=timeout, headers=headers, allow_redirects=False, **kwargs
         )
         if 300 <= response.status_code < 400:
-            return None, "The screening service returned a redirect. Check the backend URL."
+            return failure("The screening service returned a redirect. Check the backend URL.", "configuration")
         response.raise_for_status()
     except requests.Timeout:
-        return None, "The screening service timed out. It may still be processing. Check rankings before retrying."
+        return failure("The screening service timed out. It may still be processing. Check rankings before retrying.", "unconfirmed")
     except requests.HTTPError as exc:
         status = exc.response.status_code
-        if status in {400, 401, 411, 413, 429, 502, 503}:
+        code = {401: "configuration", 403: "configuration", 404: "not_found", 413: "invalid_pdf",
+                429: "rate_limited"}.get(status, "unconfirmed")
+        if status in {400, 401, 404, 411, 413, 429, 502, 503}:
             try:
                 detail = exc.response.json().get("detail")
                 if isinstance(detail, str) and 0 < len(detail) <= 200:
-                    return None, detail
+                    return failure(detail, code)
             except (ValueError, AttributeError):
                 pass
-        return None, f"The screening service returned an error (HTTP {status}). Check the backend and try again."
+        return failure(f"The screening service returned an error (HTTP {status}). Check the backend and try again.", code)
     except requests.RequestException:
-        return None, "Cannot reach the screening service. Check that the backend is running and try again."
+        return failure("Cannot reach the screening service. Check that the backend is running and try again.", "unconfirmed")
     try:
         data = response.json()
     except ValueError:
-        return None, "The screening service returned an unreadable response."
+        return failure("The screening service returned an unreadable response.", "unconfirmed")
     if not isinstance(data, dict):
-        return None, "The screening service returned an unexpected response."
+        return failure("The screening service returned an unexpected response.", "unconfirmed")
     return data, None
 
 
@@ -63,36 +68,33 @@ def backend_online():
     return not error and data.get("status") == "ok"
 
 
-def screen_resume(job_id, upload):
+def screen_resume(job_id, upload, resume_id=None):
     filename = upload.name
-    contents = upload.getvalue()
     failure = {"filename": filename, "status": "failed"}
-    if (
-        not filename.lower().endswith(".pdf")
-        or "/" in filename
-        or "\\" in filename
-        or not contents.startswith(b"%PDF-")
-    ):
-        return {**failure, "error": "Each file needs a valid PDF header and filename."}
-
-    data, error = request(
-        "POST",
-        f"/jobs/{job_id}/resumes",
-        files=[("files", (filename, contents, "application/pdf"))],
-        timeout=1800,
-    )
+    if resume_id is not None:
+        failure["resume_id"] = resume_id
+        data, error = request("POST", f"/jobs/{job_id}/resumes/{resume_id}/retry", timeout=1800, screening=True)
+        result = data
+    else:
+        contents = upload.getvalue()
+        if (not filename.lower().endswith(".pdf") or "/" in filename or "\\" in filename
+                or not contents.startswith(b"%PDF-") or len(contents) > 5 * 1024 * 1024):
+            return {**failure, "error_code": "invalid_pdf", "error": "Choose a valid PDF no larger than 5 MiB."}
+        data, error = request(
+            "POST", f"/jobs/{job_id}/resumes", files=[("files", (filename, contents, "application/pdf"))],
+            timeout=1800, screening=True,
+        )
+        results = data.get("results") if isinstance(data, dict) else None
+        result = results[0] if isinstance(results, list) and len(results) == 1 else None
     if error:
-        return {**failure, "error": error}
+        code = data.get("error_code", "unconfirmed") if isinstance(data, dict) else "unconfirmed"
+        return {**failure, "error_code": code, "error": error}
 
-    results = data.get("results")
-    if (
-        isinstance(results, list) and len(results) == 1
-        and isinstance(results[0], dict)
-        and results[0].get("status") in ("success", "failed")
-        and results[0].get("filename") == filename
-    ):
-        return results[0]
-    return {**failure, "error": "The screening service returned an incomplete result. Check rankings before retrying."}
+    if (isinstance(result, dict) and result.get("status") in ("success", "failed")
+            and result.get("filename") == filename and (resume_id is None or result.get("resume_id") == resume_id)):
+        return result
+    return {**failure, "error_code": "unconfirmed",
+            "error": "The screening service returned an incomplete result. Check rankings before retrying."}
 
 
 def valid_job(data):

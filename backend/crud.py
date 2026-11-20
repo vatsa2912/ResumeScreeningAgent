@@ -1,6 +1,8 @@
+import hashlib
 import json
+from sqlalchemy import text
 from sqlalchemy.orm import Session
-from models import Job, Resume, Score
+from models import Job, Resume, Score, ScreeningReceipt
 from logger_config import get_logger
 from rubric_builder import normalize_weights, validate_rubric
 import os
@@ -63,6 +65,52 @@ def get_resume_by_id(db: Session, resume_id: int) -> Resume | None:
     return db.query(Resume).filter(Resume.id == resume_id).first()
 
 
+def screening_digest(job_id, filename, raw_text, rubric):
+    inputs = json.dumps([job_id, filename, raw_text, rubric], sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(inputs.encode("utf-8")).hexdigest()
+
+
+def find_checkpoint(db, digest):
+    return db.query(Resume).join(ScreeningReceipt).filter(ScreeningReceipt.input_digest == digest).first()
+
+
+def find_unfinished_legacy_resume(db, job_id, filename, raw_text, resume_id=None):
+    # Existing installations may have a parsed resume from a failed scoring call.
+    has_receipt = db.query(ScreeningReceipt).filter(ScreeningReceipt.resume_id == Resume.id).exists()
+    query = db.query(Resume).filter(
+        Resume.job_id == job_id, Resume.filename == filename, Resume.raw_text == raw_text,
+        ~Resume.scores.any(), ~has_receipt,
+    )
+    if resume_id is not None:
+        query = query.filter(Resume.id == resume_id)
+    return query.order_by(Resume.id.desc()).first()
+
+
+def lock_job_for_write(db, job_id):
+    # Serialize only the short checkpoint/score writes, never the model requests.
+    db.rollback()
+    if db.get_bind().dialect.name == "sqlite":
+        db.execute(text("BEGIN IMMEDIATE"))
+    else:
+        db.query(Job.id).filter(Job.id == job_id).with_for_update().one()
+
+
+def save_checkpoint(db, digest, job_id, filename, raw_text, parsed_data, legacy_id=None):
+    lock_job_for_write(db, job_id)
+    resume = find_checkpoint(db, digest)
+    if resume is None:
+        resume = find_unfinished_legacy_resume(db, job_id, filename, raw_text, legacy_id)
+        if resume is None:
+            resume = Resume(job_id=job_id, filename=filename, raw_text=raw_text,
+                            parsed_json=json.dumps(parsed_data))
+            db.add(resume)
+            db.flush()
+        db.add(ScreeningReceipt(input_digest=digest, resume_id=resume.id))
+    resume_id = resume.id
+    db.commit()
+    return resume_id
+
+
 def get_score_for_resume(db: Session, resume_id: int) -> Score | None:
     return db.query(Score).filter(Score.resume_id == resume_id).first()
 
@@ -84,6 +132,14 @@ def create_score(db: Session, resume_id: int, job_id: int, scoring_result: dict)
     db.refresh(score)
     logger.info(f"Saved score for resume_id {resume_id}: {score.total_score}/10")
     return score
+
+
+def save_score_once(db, resume_id, job_id, scoring_result):
+    lock_job_for_write(db, job_id)
+    score = get_score_for_resume(db, resume_id) or create_score(db, resume_id, job_id, scoring_result)
+    total = score.total_score
+    db.rollback()
+    return total
 
 
 def get_rankings_for_job(db: Session, job_id: int) -> list[dict]:

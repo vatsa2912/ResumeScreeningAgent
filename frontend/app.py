@@ -1,7 +1,8 @@
 import streamlit as st
 
-from api_client import backend_online, request, screen_resume, valid_job, valid_rankings
+from api_client import backend_online, request, valid_job, valid_rankings
 from components import display_text, empty_state, footer, header, nav_button, score_bar, sidebar
+from screening import render_screening
 from styles import apply_styles
 
 st.set_page_config(page_title="Candidate Screening Hub | AI Resume Screening", page_icon=":material/groups:", layout="wide")
@@ -129,6 +130,26 @@ elif page == "Job Setup":
                         st.session_state.rubric_version += 1
                         st.rerun()
     with right:
+        if not job:
+            with st.form("reopen_job"):
+                st.subheader("Reopen a saved job")
+                saved_id = st.number_input("Saved job ID", min_value=1, value=None, step=1)
+                if st.form_submit_button("Reopen saved job") and saved_id:
+                    data, error = request("GET", f"/jobs/{saved_id}")
+                    if error:
+                        st.error(display_text(error))
+                    elif not valid_job(data) or data["id"] != saved_id:
+                        st.error("The screening service returned incomplete job data.")
+                    else:
+                        st.session_state.update(job=data, rankings=None, rankings_stale=False, eval_result=None,
+                                                weights=[round(item["weight"]) for item in data["rubric"]])
+                        st.session_state.rubric_version += 1
+                        ranking_error = refresh_rankings(saved_id)
+                        st.session_state.page = "Resume Screening"
+                        st.session_state.notice = f"Reopened job #{saved_id}."
+                        if ranking_error:
+                            st.session_state.notice += " Open Candidate Rankings to refresh the saved scores."
+                        st.rerun()
         with st.container(border=True):
             st.subheader("How it works")
             st.markdown("**01 · Describe the role**  \nShare the requirements that matter.")
@@ -188,42 +209,7 @@ elif page == "Resume Screening":
     else:
         if changed_weights(job):
             st.warning("You have unsaved weight changes. Save your criteria before evaluating candidates.")
-        with st.container(border=True):
-            st.subheader("Upload Candidate Resumes")
-            st.caption("Select your PDFs together. Shortlist screens them one at a time against your saved criteria.")
-            uploaded = st.file_uploader("Candidate resumes (PDF only)", type=["pdf"], accept_multiple_files=True, key=f"uploads_{job['id']}")
-            if uploaded:
-                st.write(f"{len(uploaded)} file(s) selected")
-                for file in uploaded:
-                    st.text(f"{file.name}  ·  {file.size / 1024:.1f} KB  ·  PDF")
-                st.caption("Selected files are cleared when you leave this page; evaluation results remain available.")
-            if st.button(f"Evaluate Candidates ({len(uploaded)})", type="primary", disabled=not uploaded or changed_weights(job)):
-                total = len(uploaded)
-                st.session_state.eval_result = []
-                progress = st.progress(0.0)
-                for index, upload in enumerate(uploaded, start=1):
-                    progress.progress(
-                        (index - 1) / total,
-                        text=f"Screening file {index} of {total}. Please keep this page open.",
-                    )
-                    st.session_state.eval_result.append(screen_resume(job["id"], upload))
-                progress.empty()
-                error = refresh_rankings(job["id"])
-                if error:
-                    st.warning("Evaluation finished, but rankings could not be refreshed. " + display_text(error))
-        results = st.session_state.eval_result
-        if results is not None:
-            successes = sum(r["status"] == "success" for r in results)
-            failures = [r for r in results if r["status"] == "failed"]
-            st.success(f"Evaluation finished: {successes} succeeded and {len(failures)} failed.")
-            if failures:
-                with st.expander("Review processing errors"):
-                    for item in failures:
-                        st.text(item["filename"])
-                        error = item.get("error")
-                        # Expose expected, short per-file failures, never traces or raw responses.
-                        st.caption(display_text(error) if isinstance(error, str) and 0 < len(error) <= 200 else "Could not process this resume.")
-            nav_button("View Candidate Rankings →", "Candidate Rankings", key="upload_next", primary=True)
+        render_screening(job, changed_weights(job), refresh_rankings)
 
 elif page == "Candidate Rankings":
     if not job:

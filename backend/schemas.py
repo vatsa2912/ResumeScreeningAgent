@@ -38,6 +38,8 @@ class ResumeUploadResult(BaseModel):
     resume_id: int | None = None
     total_score: float | None = None
     error: str | None = None
+    error_code: str | None = None
+    retry_after_seconds: int | None = None
 
 
 class BulkUploadResponse(BaseModel):

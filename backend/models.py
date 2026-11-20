@@ -32,6 +32,13 @@ class Resume(Base):
     scores = relationship("Score", back_populates="resume")
 
 
+class ScreeningReceipt(Base):
+    __tablename__ = "screening_receipts"
+
+    input_digest = Column(String(64), primary_key=True)
+    resume_id = Column(Integer, ForeignKey("resumes.id"), nullable=False, unique=True)
+
+
 class Score(Base):
     __tablename__ = "scores"
 
