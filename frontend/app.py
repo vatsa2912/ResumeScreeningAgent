@@ -1,6 +1,6 @@
 import streamlit as st
 
-from api_client import backend_online, request, valid_job, valid_rankings
+from api_client import backend_online, request, screen_resume, valid_job, valid_rankings
 from components import display_text, empty_state, footer, header, nav_button, score_bar, sidebar
 from styles import apply_styles
 
@@ -190,7 +190,7 @@ elif page == "Resume Screening":
             st.warning("You have unsaved weight changes. Save your criteria before evaluating candidates.")
         with st.container(border=True):
             st.subheader("Upload Candidate Resumes")
-            st.caption("Choose one or more PDF files. The AI model evaluates each against your saved criteria.")
+            st.caption("Select your PDFs together. Shortlist screens them one at a time against your saved criteria.")
             uploaded = st.file_uploader("Candidate resumes (PDF only)", type=["pdf"], accept_multiple_files=True, key=f"uploads_{job['id']}")
             if uploaded:
                 st.write(f"{len(uploaded)} file(s) selected")
@@ -198,24 +198,19 @@ elif page == "Resume Screening":
                     st.text(f"{file.name}  ·  {file.size / 1024:.1f} KB  ·  PDF")
                 st.caption("Selected files are cleared when you leave this page; evaluation results remain available.")
             if st.button(f"Evaluate Candidates ({len(uploaded)})", type="primary", disabled=not uploaded or changed_weights(job)):
-                invalid = any(not f.name.lower().endswith(".pdf") or f.size == 0 or f.name != f.name.replace("/", "").replace("\\", "") or not f.getvalue().startswith(b"%PDF-") for f in uploaded)
-                if invalid:
-                    st.error("Each selection must be a non-empty PDF with a valid filename and PDF header.")
-                else:
-                    payload = [("files", (f.name, f.getvalue(), "application/pdf")) for f in uploaded]
-                    with st.spinner("Evaluating candidates. This may take several minutes; please keep this page open."):
-                        data, error = request("POST", f"/jobs/{job['id']}/resumes", files=payload, timeout=1800)
-                    if error:
-                        st.error(display_text(error))
-                    elif not isinstance(data.get("results"), list) or any(not isinstance(r, dict) or r.get("status") not in ("success", "failed") or not isinstance(r.get("filename"), str) for r in data["results"]):
-                        st.error("The screening service returned incomplete evaluation results.")
-                    else:
-                        st.session_state.eval_result = data["results"]
-                        error = refresh_rankings(job["id"])
-                        if error:
-                            st.warning("Evaluation finished, but rankings could not be refreshed. " + display_text(error))
-                        # The backend retains old scores; re-evaluation cannot verify all are current.
-                        st.rerun()
+                total = len(uploaded)
+                st.session_state.eval_result = []
+                progress = st.progress(0.0)
+                for index, upload in enumerate(uploaded, start=1):
+                    progress.progress(
+                        (index - 1) / total,
+                        text=f"Screening file {index} of {total}. Please keep this page open.",
+                    )
+                    st.session_state.eval_result.append(screen_resume(job["id"], upload))
+                progress.empty()
+                error = refresh_rankings(job["id"])
+                if error:
+                    st.warning("Evaluation finished, but rankings could not be refreshed. " + display_text(error))
         results = st.session_state.eval_result
         if results is not None:
             successes = sum(r["status"] == "success" for r in results)

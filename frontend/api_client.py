@@ -63,6 +63,38 @@ def backend_online():
     return not error and data.get("status") == "ok"
 
 
+def screen_resume(job_id, upload):
+    filename = upload.name
+    contents = upload.getvalue()
+    failure = {"filename": filename, "status": "failed"}
+    if (
+        not filename.lower().endswith(".pdf")
+        or "/" in filename
+        or "\\" in filename
+        or not contents.startswith(b"%PDF-")
+    ):
+        return {**failure, "error": "Each file needs a valid PDF header and filename."}
+
+    data, error = request(
+        "POST",
+        f"/jobs/{job_id}/resumes",
+        files=[("files", (filename, contents, "application/pdf"))],
+        timeout=1800,
+    )
+    if error:
+        return {**failure, "error": error}
+
+    results = data.get("results")
+    if (
+        isinstance(results, list) and len(results) == 1
+        and isinstance(results[0], dict)
+        and results[0].get("status") in ("success", "failed")
+        and results[0].get("filename") == filename
+    ):
+        return results[0]
+    return {**failure, "error": "The screening service returned an incomplete result. Check rankings before retrying."}
+
+
 def valid_job(data):
     return (isinstance(data, dict) and isinstance(data.get("id"), int)
             and isinstance(data.get("title"), str) and isinstance(data.get("rubric"), list)

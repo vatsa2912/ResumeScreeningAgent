@@ -15,6 +15,7 @@ logger = get_logger(__name__)
 RATE_LIMIT = "The free AI usage limit has been reached. Please try again later."
 UNAVAILABLE = "The AI service is temporarily busy. Please try again shortly."
 INVALID_OUTPUT = "The AI service returned an invalid response. Please try again."
+MAX_RATE_LIMIT_WAIT = 60
 
 
 class LLMError(RuntimeError):
@@ -75,6 +76,7 @@ def chat_json(prompt, *, array=False):
     }
     for attempt in range(2):
         delay = 2 ** attempt
+        max_wait = 5
         try:
             response = client().post("chat/completions", json=payload)
         except httpx.TransportError as exc:
@@ -113,6 +115,8 @@ def chat_json(prompt, *, array=False):
                 raise LLMError("The AI service rejected the input or model configuration. Try shorter input or check the model.", 502)
             error = LLMError(RATE_LIMIT, 429) if status == 429 else LLMError(UNAVAILABLE, 503)
             delay = retry_delay(response.headers.get("retry-after"), attempt)
-        if attempt == 1 or delay > 5:
+            if status == 429:
+                max_wait = MAX_RATE_LIMIT_WAIT
+        if attempt == 1 or delay > max_wait:
             raise error
         time.sleep(delay)

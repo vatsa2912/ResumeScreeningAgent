@@ -148,7 +148,7 @@ class ProviderTests(unittest.TestCase):
         def respond(request):
             requests.append(request)
             if len(requests) == 1:
-                return httpx.Response(429, headers={"Retry-After": "2"})
+                return httpx.Response(429, headers={"Retry-After": "30"})
             return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"items": RUBRIC})}}]})
 
         with (
@@ -160,18 +160,18 @@ class ProviderTests(unittest.TestCase):
             patch.object(llm_provider.time, "sleep") as sleep,
         ):
             self.assertEqual(rubric_builder.build_rubric("Python"), RUBRIC)
-        sleep.assert_called_once_with(2)
+        sleep.assert_called_once_with(30)
         self.assertEqual(json.loads(requests[1].content)["response_format"], {"type": "json_object"})
 
     def test_groq_long_wait_and_configuration_fail_fast(self):
-        for status in (429, 401, 404, 400):
+        for status, retry_after in ((429, "100"), (401, "100"), (404, "100"), (400, "100"), (503, "30")):
             with (
                 patch.object(llm_provider, "client") as client,
                 patch.object(llm_provider, "LLM_PROVIDER", "groq"),
                 patch.dict(os.environ, {"GROQ_MODEL": "test-model"}),
                 patch.object(llm_provider.time, "sleep") as sleep,
             ):
-                client.return_value.post.return_value = httpx.Response(status, headers={"Retry-After": "100"})
+                client.return_value.post.return_value = httpx.Response(status, headers={"Retry-After": retry_after})
                 with self.assertRaises(llm_provider.LLMError) as raised:
                     llm_provider.chat_json("test")
                 self.assertEqual(raised.exception.status_code, 429 if status == 429 else 502 if status == 400 else 503)
@@ -180,6 +180,52 @@ class ProviderTests(unittest.TestCase):
 
 
 class StreamlitTests(unittest.TestCase):
+    def test_multiple_uploads_continue_after_individual_failures(self):
+        from streamlit.testing.v1 import AppTest
+        import api_client
+
+        submitted = []
+        valid_pdf = synthetic_pdf()
+
+        def respond(method, path, **kwargs):
+            if method == "GET":
+                self.assertEqual(path, "/jobs/1/rankings")
+                return {"rankings": []}, None
+            self.assertEqual((method, path), ("POST", "/jobs/1/resumes"))
+            [(field, (filename, content, mime_type))] = kwargs["files"]
+            self.assertEqual((field, content, mime_type), ("files", valid_pdf, "application/pdf"))
+            submitted.append(filename)
+            if filename == "unavailable.pdf":
+                return None, "The screening service is temporarily unavailable."
+            return {"results": [{"filename": filename, "status": "success", "total_score": 8}]}, None
+
+        with (
+            patch.object(api_client, "backend_online", return_value=True),
+            patch.object(api_client, "request", side_effect=respond),
+        ):
+            app = AppTest.from_file(str(ROOT / "frontend" / "app.py")).run()
+            app.session_state["job"] = {"id": 1, "title": "Developer", "rubric": RUBRIC}
+            app.session_state["weights"] = [100]
+            app.button(key="nav_Resume Screening").click().run()
+            app.file_uploader[0].set_value([
+                ("first.pdf", valid_pdf, "application/pdf"),
+                ("invalid.pdf", b"not a PDF", "application/pdf"),
+                ("unavailable.pdf", valid_pdf, "application/pdf"),
+                ("last.pdf", valid_pdf, "application/pdf"),
+            ]).run()
+            next(button for button in app.button if "Evaluate Candidates" in button.label).click().run()
+
+        self.assertFalse(app.exception)
+        self.assertEqual(submitted, ["first.pdf", "unavailable.pdf", "last.pdf"])
+        results = {item["filename"]: item for item in app.session_state["eval_result"]}
+        self.assertEqual({name: item["status"] for name, item in results.items()}, {
+            "first.pdf": "success",
+            "invalid.pdf": "failed",
+            "unavailable.pdf": "failed",
+            "last.pdf": "success",
+        })
+        self.assertIn("temporarily unavailable", results["unavailable.pdf"]["error"])
+
     def test_navigation_rubric_and_rankings_state(self):
         from streamlit.testing.v1 import AppTest
         import api_client
